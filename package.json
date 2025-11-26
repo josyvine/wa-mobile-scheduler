@@ -1,7 +1,7 @@
 {
   "name": "wa-mobile-scheduler",
   "version": "1.0.0",
-  "description": "WhatsApp Backend",
+  "description": "WhatsApp Backend Low Memory",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
