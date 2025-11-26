@@ -24,8 +24,7 @@ const io = new Server(server, {
 });
 
 // --- STORAGE CONFIGURATION ---
-// We use the 'uploads' folder. In Railway, we will mount a Volume here
-// so files and login sessions are not deleted during restarts.
+// We use the 'uploads' folder so files are not deleted immediately
 const uploadDir = path.join(__dirname, 'uploads');
 fs.ensureDirSync(uploadDir);
 
@@ -41,7 +40,7 @@ const storage = multer.diskStorage({
 });
 const upload = multer({ storage: storage });
 
-// --- WHATSAPP CLIENT CONFIGURATION ---
+// --- WHATSAPP CLIENT CONFIGURATION (LOW MEMORY MODE) ---
 const client = new Client({
     // Save login session in the uploads folder for persistence
     authStrategy: new LocalAuth({ 
@@ -55,13 +54,19 @@ const client = new Client({
             '--no-sandbox',
             '--disable-setuid-sandbox',
             '--disable-dev-shm-usage',
-            '--disable-gpu'
+            '--disable-gpu',
+            // MEMORY OPTIMIZATIONS FOR FREE TIER:
+            '--disable-extensions',
+            '--disable-accelerated-2d-canvas',
+            '--no-first-run',
+            '--no-zygote',
+            '--single-process', 
+            '--disable-notifications'
         ]
     }
 });
 
 // Track scheduled tasks in memory
-// Map Structure: { "uniqueId": { timeout: TimerObj, filePath: String } }
 const scheduledTasks = new Map();
 
 let isReady = false;
@@ -81,13 +86,12 @@ client.on('ready', () => {
     io.emit('ready', true);
 });
 
-// 3. Client Disconnected
+// 3. Client Disconnected (Auto-Restart)
 client.on('disconnected', (reason) => {
     console.log('WhatsApp Client disconnected:', reason);
     isReady = false;
     io.emit('disconnected', reason);
-    // Optional: Try to restart client
-    client.initialize();
+    client.initialize(); // Try to reconnect immediately
 });
 
 client.initialize();
@@ -97,7 +101,7 @@ client.initialize();
 // Route 1: Get List of Groups
 app.get('/api/groups', async (req, res) => {
     if (!isReady) {
-        return res.status(503).json({ error: 'WhatsApp not ready yet. Please scan QR.' });
+        return res.status(503).json({ error: 'WhatsApp not ready yet. Please wait.' });
     }
 
     try {
@@ -132,9 +136,7 @@ app.post('/api/schedule', upload.single('image'), (req, res) => {
 
     // If time is in the past, delete file and reject
     if (delay < 0) {
-        fs.unlink(file.path, (err) => {
-            if (err) console.error('Error deleting file:', err);
-        });
+        fs.unlink(file.path, () => {});
         return res.status(400).json({ error: 'Scheduled time is in the past.' });
     }
 
@@ -143,21 +145,17 @@ app.post('/api/schedule', upload.single('image'), (req, res) => {
     // Set the Timer
     const timeoutId = setTimeout(async () => {
         try {
-            // Check if file still exists (double check)
+            // Check if file still exists
             if (fs.existsSync(file.path)) {
                 // Read and Send Media
                 const media = MessageMedia.fromFilePath(file.path);
                 await client.sendMessage(groupId, media);
                 
-                console.log(`Sent image: ${uiId}`);
-                
                 // Notify Front End
                 io.emit('message_sent', { id: uiId, status: 'Sent' });
 
                 // Delete file to free space
-                fs.unlink(file.path, (err) => {
-                    if (err) console.error('Error deleting file:', err);
-                });
+                fs.unlink(file.path, () => {});
             }
             // Remove from tracking map
             scheduledTasks.delete(uiId);
@@ -189,7 +187,6 @@ app.post('/api/cancel', (req, res) => {
         // 2. Delete the File immediately
         if (fs.existsSync(task.filePath)) {
             fs.unlinkSync(task.filePath);
-            console.log(`Deleted file for cancelled task ${id}`);
         }
 
         // 3. Remove from Map
